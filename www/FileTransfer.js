@@ -209,4 +209,8 @@ FileTransfer.prototype.abort = function() {
     exec(null, null, 'FileTransfer', 'abort', [this._id]);
 };
 
+FileTransfer.prototype.enableSSLPinning = function(enable, successCallback, errorCallback) {
+    exec(successCallback, errorCallback, 'FileTransfer', 'enableSSLPinning', [enable]);
+}
+
 module.exports = FileTransfer;

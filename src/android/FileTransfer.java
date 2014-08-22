@@ -18,6 +18,7 @@
 */
 package org.apache.cordova.filetransfer;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -33,8 +34,13 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URLConnection;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.security.cert.CertificateException;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.zip.GZIPInputStream;
@@ -46,6 +52,7 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 import org.apache.cordova.Config;
@@ -60,12 +67,16 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.Build;
 import android.util.Log;
 import android.webkit.CookieManager;
 
 public class FileTransfer extends CordovaPlugin {
+
+    private static SSLSocketFactory PINNED_FACTORY;
+    private static ArrayList<Certificate> PINNED_CERTS;
 
     private static final String LOG_TAG = "FileTransfer";
     private static final String LINE_START = "--";
@@ -80,6 +91,99 @@ public class FileTransfer extends CordovaPlugin {
 
     private static HashMap<String, RequestContext> activeRequests = new HashMap<String, RequestContext>();
     private static final int MAX_BUFFER_SIZE = 16 * 1024;
+
+    private static SSLSocketFactory getPinnedFactory()
+            throws CertificateException {
+        if (PINNED_FACTORY != null) {
+            return PINNED_FACTORY;
+        } else {
+            IOException e = new IOException(
+                    "You must add at least 1 certificate in order to pin to certificates");
+            throw new CertificateException(e);
+        }
+    }
+
+    /**
+     * Add a certificate to test against when using ssl pinning.
+     * 
+     * @param ca
+     *            The Certificate to add
+     * @throws GeneralSecurityException
+     * @throws IOException
+     */
+    public static void addCert(Certificate ca) throws GeneralSecurityException,
+            IOException {
+        if (PINNED_CERTS == null) {
+            PINNED_CERTS = new ArrayList<Certificate>();
+        }
+        PINNED_CERTS.add(ca);
+        String keyStoreType = KeyStore.getDefaultType();
+        KeyStore keyStore = KeyStore.getInstance(keyStoreType);
+        keyStore.load(null, null);
+
+        for (int i = 0; i < PINNED_CERTS.size(); i++) {
+            keyStore.setCertificateEntry("CA" + i, PINNED_CERTS.get(i));
+        }
+
+        // Create a TrustManager that trusts the CAs in our KeyStore
+        String tmfAlgorithm = TrustManagerFactory.getDefaultAlgorithm();
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(tmfAlgorithm);
+        tmf.init(keyStore);
+
+        // Create an SSLContext that uses our TrustManager
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, tmf.getTrustManagers(), null);
+        PINNED_FACTORY = sslContext.getSocketFactory();
+    }
+
+    /**
+     * Add a certificate to test against when using ssl pinning.
+     * 
+     * @param in
+     *            An InputStream to read a certificate from
+     * @throws GeneralSecurityException
+     * @throws IOException
+     */
+    public static void addCert(InputStream in) throws GeneralSecurityException,
+            IOException {
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        Certificate ca;
+        try {
+            ca = cf.generateCertificate(in);
+            addCert(ca);
+        } finally {
+            in.close();
+        }
+    }
+
+    private void enableSSLPinning(boolean enable)
+            throws GeneralSecurityException, IOException {
+        if (enable) {
+            Log.d(LOG_TAG, "enableSSLPinning called");
+            AssetManager assetManager = cordova.getActivity().getAssets();
+            String[] files = assetManager.list("");
+            int index;
+            ArrayList<String> cerFiles = new ArrayList<String>();
+            for (int i = 0; i < files.length; i++) {
+                index = files[i].lastIndexOf('.');
+                if (index != -1) {
+                    if (files[i].substring(index).equals(".cer")) {
+                        cerFiles.add(files[i]);
+                    }
+                }
+            }
+
+            for (int i = 0; i < cerFiles.size(); i++) {
+                InputStream in = cordova.getActivity().getAssets()
+                        .open(cerFiles.get(i));
+                InputStream caInput = new BufferedInputStream(in);
+                addCert(caInput);
+                Log.d(LOG_TAG, "addCert called");
+            }
+        } else {
+            PINNED_FACTORY = null;
+        }
+    }
 
     private static final class RequestContext {
         String source;
@@ -178,6 +282,25 @@ public class FileTransfer extends CordovaPlugin {
             String source = args.getString(0);
             String target = args.getString(1);
 
+            // For now we are ALWAYS enabling cert pinning
+            if (PINNED_FACTORY == null) {
+                try {
+                    enableSSLPinning(true);
+                    Log.d(LOG_TAG, "Enabling SSL certificate pinning");
+                } catch (GeneralSecurityException e) {
+                    callbackContext
+                            .sendPluginResult(new PluginResult(
+                                    PluginResult.Status.ERROR,
+                                    "General security error"));
+                    e.printStackTrace();
+                } catch (IOException e) {
+                    callbackContext.sendPluginResult(new PluginResult(
+                            PluginResult.Status.IO_EXCEPTION,
+                            "Certificate error"));
+                    e.printStackTrace();
+                }
+            }
+
             if (action.equals("upload")) {
                 upload(source, target, args, callbackContext);
             } else {
@@ -189,11 +312,40 @@ public class FileTransfer extends CordovaPlugin {
             abort(objectId);
             callbackContext.success();
             return true;
+        } else if (action.equals("enableSSLPinning")) {
+            Boolean enable = args.getBoolean(0);
+            enablePinning(enable, callbackContext);
+            return true;
         }
         return false;
     }
 
-    private static void addHeadersToRequest(URLConnection connection, JSONObject headers) {
+    private void enablePinning(Boolean enable, CallbackContext callbackContext) {
+        final Boolean enablePins = enable;
+        final CallbackContext context = callbackContext;
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                try {
+                    enableSSLPinning(enablePins);
+                    context.sendPluginResult(new PluginResult(
+                            PluginResult.Status.OK, "SSL pinning enabled"));
+                } catch (GeneralSecurityException e) {
+                    context.sendPluginResult(new PluginResult(
+                            PluginResult.Status.ERROR, "General security error"));
+                    e.printStackTrace();
+                } catch (IOException e) {
+                    context.sendPluginResult(new PluginResult(
+                            PluginResult.Status.IO_EXCEPTION,
+                            "Certificate error"));
+                    e.printStackTrace();
+                }
+
+            }
+        });
+    }
+
+    private static void addHeadersToRequest(URLConnection connection,
+            JSONObject headers) {
         try {
             for (Iterator<?> iter = headers.keys(); iter.hasNext(); ) {
                 String headerKey = iter.next().toString();
@@ -299,6 +451,10 @@ public class FileTransfer extends CordovaPlugin {
                         oldHostnameVerifier = https.getHostnameVerifier();
                         // Setup the connection not to verify hostnames
                         https.setHostnameVerifier(DO_NOT_VERIFY);
+                    } else if (useHttps && (PINNED_FACTORY != null)) {
+                        // Setup the HTTPS connection class to pin certs
+                        HttpsURLConnection https = (HttpsURLConnection) conn;
+                        oldSocketFactory = pinnedHosts(https);
                     }
 
                     // Allow Inputs
@@ -379,8 +535,16 @@ public class FileTransfer extends CordovaPlugin {
                         conn.setFixedLengthStreamingMode(fixedLength);
                     }
 
-                    conn.connect();
-                    
+                    try {
+                        conn.connect();
+                    } catch (Exception e) {
+                        if (e.getCause() instanceof CertificateException) {
+                            JSONObject error = createFileTransferError(
+                                    CONNECTION_ERR, source, target, conn, null);
+                            new PluginResult(PluginResult.Status.ERROR, error);
+                        }
+                    }
+
                     OutputStream sendStream = null;
                     try {
                         sendStream = conn.getOutputStream();
@@ -502,6 +666,10 @@ public class FileTransfer extends CordovaPlugin {
                             HttpsURLConnection https = (HttpsURLConnection) conn;
                             https.setHostnameVerifier(oldHostnameVerifier);
                             https.setSSLSocketFactory(oldSocketFactory);
+                        } else if (useHttps && (PINNED_FACTORY != null)) {
+                            // Revert back to the unpinned socket factory (why?)
+                            HttpsURLConnection https = (HttpsURLConnection) conn;
+                            https.setSSLSocketFactory(oldSocketFactory);
                         }
                     }
                 }                
@@ -570,7 +738,22 @@ public class FileTransfer extends CordovaPlugin {
         return oldFactory;
     }
 
-    private static JSONObject createFileTransferError(int errorCode, String source, String target, URLConnection connection, Throwable throwable) {
+    private static SSLSocketFactory pinnedHosts(HttpsURLConnection connection) {
+        // Install the all-trusting trust manager
+        SSLSocketFactory oldFactory = connection.getSSLSocketFactory();
+        try {
+            // Install our pinned trust manager
+            // SSLContext sc = SSLContext.getInstance("TLS");
+            connection.setSSLSocketFactory(getPinnedFactory());
+        } catch (Exception e) {
+            Log.e(LOG_TAG, e.getMessage(), e);
+        }
+        return oldFactory;
+    }
+
+    private static JSONObject createFileTransferError(int errorCode,
+            String source, String target, URLConnection connection,
+            Throwable throwable) {
 
         int httpStatus = 0;
         StringBuilder bodyBuilder = new StringBuilder();
@@ -745,6 +928,10 @@ public class FileTransfer extends CordovaPlugin {
                             oldHostnameVerifier = https.getHostnameVerifier();
                             // Setup the connection not to verify hostnames
                             https.setHostnameVerifier(DO_NOT_VERIFY);
+                        } else if (useHttps && (PINNED_FACTORY != null)) {
+                            // Setup the HTTPS connection class to pin certs
+                            HttpsURLConnection https = (HttpsURLConnection) connection;
+                            oldSocketFactory = pinnedHosts(https);
                         }
         
                         connection.setRequestMethod("GET");
@@ -763,8 +950,18 @@ public class FileTransfer extends CordovaPlugin {
                         if (headers != null) {
                             addHeadersToRequest(connection, headers);
                         }
-        
-                        connection.connect();
+
+                        try {
+                            connection.connect();
+                        } catch (Exception e) {
+                            if (e.getCause() instanceof CertificateException) {
+                                JSONObject error = createFileTransferError(
+                                        CONNECTION_ERR, source, target,
+                                        connection, null);
+                                result = new PluginResult(
+                                        PluginResult.Status.ERROR, error);
+                            }
+                        }
                         if (connection.getResponseCode() == HttpURLConnection.HTTP_NOT_MODIFIED) {
                             cached = true;
                             connection.disconnect();
@@ -877,6 +1074,10 @@ public class FileTransfer extends CordovaPlugin {
                         if (trustEveryone && useHttps) {
                             HttpsURLConnection https = (HttpsURLConnection) connection;
                             https.setHostnameVerifier(oldHostnameVerifier);
+                            https.setSSLSocketFactory(oldSocketFactory);
+                        } else if (useHttps && (PINNED_FACTORY != null)) {
+                            // Revert back to the unpinned socket factory (why?)
+                            HttpsURLConnection https = (HttpsURLConnection) connection;
                             https.setSSLSocketFactory(oldSocketFactory);
                         }
                     }
