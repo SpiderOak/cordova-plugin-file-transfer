@@ -42,6 +42,7 @@ extern NSString* const kOptionsKeyCookie;
 
 - (void)upload:(CDVInvokedUrlCommand*)command;
 - (void)download:(CDVInvokedUrlCommand*)command;
+- (void)enableSSLPinning:(CDVInvokedUrlCommand*)command;
 - (NSString*)escapePathComponentForUrlString:(NSString*)urlString;
 
 // Visible for testing.
@@ -55,6 +56,7 @@ extern NSString* const kOptionsKeyCookie;
                                         AndBody:(NSString*)body;
 @property (nonatomic, strong) NSOperationQueue* queue;
 @property (readonly) NSMutableDictionary* activeTransfers;
+@property (nonatomic, assign) BOOL enableCertPinning;
 @end
 
 @class CDVFileTransferEntityLengthRequest;
@@ -80,6 +82,7 @@ extern NSString* const kOptionsKeyCookie;
 @property (nonatomic, assign) long long bytesTransfered;
 @property (nonatomic, assign) long long bytesExpected;
 @property (nonatomic, assign) BOOL trustAllHosts;
+@property (nonatomic, assign) BOOL enableCertPinning;
 @property (strong) NSFileHandle* targetFileHandle;
 @property (nonatomic, strong) CDVFileTransferEntityLengthRequest* entityLengthRequest;
 @property (nonatomic, strong) CDVFile *filePlugin;

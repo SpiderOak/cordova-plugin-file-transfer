@@ -70,10 +70,12 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
 }
 
 @implementation CDVFileTransfer
-@synthesize activeTransfers;
+@synthesize activeTransfers, enableCertPinning;
 
 - (void)pluginInitialize {
     activeTransfers = [[NSMutableDictionary alloc] init];
+    // For now we are ALWAYS enabling cert pinning
+    enableCertPinning = YES;
 }
 
 - (NSString*)escapePathComponentForUrlString:(NSString*)urlString
@@ -360,6 +362,11 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
     }
 }
 
+-(void)enableSSLPinning:(CDVInvokedUrlCommand*)command
+{
+    self.enableCertPinning = [[command.arguments objectAtIndex:0 withDefault:[NSNumber numberWithBool:NO]] boolValue]; // enable cert pinning
+}
+
 - (void)download:(CDVInvokedUrlCommand*)command
 {
     DLog(@"File Transfer downloading file...");
@@ -415,6 +422,7 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
     delegate.target = [targetURL absoluteString];
     delegate.targetURL = targetURL;
     delegate.trustAllHosts = trustAllHosts;
+    delegate.enableCertPinning = self.enableCertPinning;
     delegate.filePlugin = [self.commandDelegate getCommandInstance:@"File"];
     delegate.backgroundTaskID = [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{
         [delegate cancelTransfer:delegate.connection];
@@ -752,13 +760,83 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
     self.bytesTransfered = totalBytesWritten;
 }
 
-// for self signed certificates
+/**
+ * This is a mishmash from:
+ * https://github.com/iSECPartners/ssl-conservatory/blob/master/ios/SSLCertificatePinning/SSLCertificatePinning/ISPCertificatePinning.m
+ * and 
+ * http://www.indelible.org/ink/trusted-ssl-certificates/
+ */
+- (BOOL)shouldTrustProtectionSpace:(NSURLProtectionSpace *)protectionSpace {
+    // Load up the bundled certificate.
+    static NSArray *_defaultPinnedCertificates = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+        NSArray *paths = [bundle pathsForResourcesOfType:@"cer" inDirectory:@"."];
+        
+        NSMutableArray *certificates = [NSMutableArray arrayWithCapacity:[paths count]];
+        for (NSString *path in paths) {
+            NSData *certificateData = [NSData dataWithContentsOfFile:path];
+            [certificates addObject:certificateData];
+        }
+        
+        _defaultPinnedCertificates = [[NSArray alloc] initWithArray:certificates];
+    });
+    
+    SecTrustRef serverTrust = protectionSpace.serverTrust;
+    
+    for (NSData *pinnedCertificate in _defaultPinnedCertificates) {
+        // Check each certificate in the server's trust chain (the trust object)
+        // Unfortunately the anchor/CA certificate cannot be accessed this way
+        CFIndex certsNb = SecTrustGetCertificateCount(serverTrust);
+        for(int i=0;i<certsNb;i++) {
+            
+            // Extract the certificate
+            SecCertificateRef certificate = SecTrustGetCertificateAtIndex(serverTrust, i);
+            NSData* DERCertificate = (__bridge NSData*) SecCertificateCopyData(certificate);
+            
+            // Compare the two certificates
+            if ([pinnedCertificate isEqualToData:DERCertificate]) {
+                return YES;
+            }
+        }
+        // Check the anchor/CA certificate separately
+        SecCertificateRef anchorCertificate = SecCertificateCreateWithData(NULL, (__bridge CFDataRef)(pinnedCertificate));
+        if (anchorCertificate == NULL) {
+            break;
+        }
+        NSArray *anchorArray = [NSArray arrayWithObject:(__bridge id)(anchorCertificate)];
+        if (SecTrustSetAnchorCertificates(serverTrust, (__bridge CFArrayRef)(anchorArray)) != 0) {
+            CFRelease(anchorCertificate);
+            break;
+        }
+        
+        SecTrustResultType trustResult;
+        SecTrustEvaluate(serverTrust, &trustResult);
+        if (trustResult == kSecTrustResultUnspecified) {
+            // The anchor certificate was pinned
+            CFRelease(anchorCertificate);
+            return YES;
+        }
+        CFRelease(anchorCertificate);
+    }
+
+    // If we get here, we didn't find any matching certificate in the chain
+    return NO;
+}
+
+// for self signed certificates or certificate pinning
 - (void)connection:(NSURLConnection*)connection willSendRequestForAuthenticationChallenge:(NSURLAuthenticationChallenge*)challenge
 {
     if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
         if (self.trustAllHosts) {
             NSURLCredential* credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
             [challenge.sender useCredential:credential forAuthenticationChallenge:challenge];
+        }
+        if (self.enableCertPinning) {
+            if ([self shouldTrustProtectionSpace:challenge.protectionSpace]) {
+                [challenge.sender useCredential:[NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust] forAuthenticationChallenge:challenge];
+            }
         }
         [challenge.sender continueWithoutCredentialForAuthenticationChallenge:challenge];
     } else {
