@@ -54,9 +54,11 @@ extern NSString* const kOptionsKeyCookie;
                                       AndTarget:(NSString*)target
                                   AndHttpStatus:(int)httpStatus
                                         AndBody:(NSString*)body;
+-(OSStatus)extractIdentity:(SecIdentityRef *)identity andTrust:(SecTrustRef *)trust;
 @property (nonatomic, strong) NSOperationQueue* queue;
 @property (readonly) NSMutableDictionary* activeTransfers;
 @property (nonatomic, assign) BOOL enableCertPinning;
+@property (nonatomic, assign) OSStatus securityError;
 @end
 
 @class CDVFileTransferEntityLengthRequest;
@@ -86,5 +88,6 @@ extern NSString* const kOptionsKeyCookie;
 @property (strong) NSFileHandle* targetFileHandle;
 @property (nonatomic, strong) CDVFileTransferEntityLengthRequest* entityLengthRequest;
 @property (nonatomic, strong) CDVFile *filePlugin;
+@property (nonatomic, assign) OSStatus securityError;
 
 @end

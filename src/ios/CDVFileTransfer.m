@@ -838,6 +838,61 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
 }
 
 // for self signed certificates or certificate pinning
+-(OSStatus)extractIdentity:(SecIdentityRef *)identity andTrust:(SecTrustRef *)trust
+{
+    OSStatus securityError = errSecSuccess;
+    CFDictionaryRef options = NULL;
+    CFArrayRef items;
+    
+    if (!self.securityError) {
+        NSString *filePath = [[NSBundle mainBundle] pathForResource:@"clientauth" ofType:@"json"];
+        NSData *data = [NSData dataWithContentsOfFile:filePath];
+        // NSArray *json = [NSJSONSerialization JSONObjectWithData:data options:kNilOptions error:nil];
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:kNilOptions error:nil];
+        
+        NSString *key_store = [json objectForKey:@"KEY_STORE"];
+        NSString *key_store_type = [[key_store componentsSeparatedByString:@"."] lastObject];
+        NSString *key_store_password = [json objectForKey:@"KEY_STORE_PASSWORD"];
+        
+        CFStringRef password = (CFStringRef)CFBridgingRetain(key_store_password);
+        
+        NSString *thePath = [[NSBundle mainBundle]
+                             pathForResource:[[key_store componentsSeparatedByString:@"."]
+                                              firstObject]
+                             ofType:key_store_type];
+        NSData *PKCS12Data = [[NSData alloc] initWithContentsOfFile:thePath];
+        CFDataRef inP12data = (__bridge CFDataRef)PKCS12Data;
+        
+        const void *keys[] = { kSecImportExportPassphrase };
+        const void *values[] = { password };
+        
+        options = CFDictionaryCreate(NULL, keys, values, 1, NULL, NULL);
+        
+        items = CFArrayCreate(NULL, 0, 0, NULL);
+        securityError = SecPKCS12Import(inP12data, options, &items);
+        PKCS12Data = NULL;
+        self.securityError = securityError;
+    } else {
+        securityError = self.securityError;
+    }
+    
+    if (securityError == 0) {
+        CFDictionaryRef myIdentityAndTrust = CFArrayGetValueAtIndex(items, 0);
+        const void *tempIdentity = NULL;
+        tempIdentity = CFDictionaryGetValue(myIdentityAndTrust, kSecImportItemIdentity);
+        *identity = (SecIdentityRef)tempIdentity;
+        const void *tempTrust = NULL;
+        tempTrust = CFDictionaryGetValue(myIdentityAndTrust, kSecImportItemTrust);
+        *trust = (SecTrustRef)tempTrust;
+    }
+    
+    if (options) {
+        CFRelease(options);
+    }
+    
+    return securityError;
+}
+
 - (void)connection:(NSURLConnection*)connection willSendRequestForAuthenticationChallenge:(NSURLAuthenticationChallenge*)challenge
 {
     if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
@@ -851,6 +906,28 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
             }
         }
         [challenge.sender continueWithoutCredentialForAuthenticationChallenge:challenge];
+    } else if ([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodClientCertificate]) {
+        OSStatus status = noErr;
+        SecIdentityRef myIdentity = NULL;
+        SecTrustRef myTrust;
+        
+        status = [self extractIdentity:&myIdentity andTrust:&myTrust];
+        SecTrustResultType trustResult;
+        
+        if (status == noErr) {
+            status = SecTrustEvaluate(myTrust, &trustResult);
+        }
+        
+        SecCertificateRef myCertificate;
+        SecIdentityCopyCertificate(myIdentity, &myCertificate);
+        const void *certs[] = { myCertificate };
+        CFArrayRef certsArray = CFArrayCreate(NULL, certs, 1, NULL);
+        
+        
+        NSURLCredential *credential = [NSURLCredential credentialWithIdentity:myIdentity certificates:(NSArray*)CFBridgingRelease(certsArray) persistence:NSURLCredentialPersistencePermanent];
+        
+        [[challenge sender] useCredential:credential forAuthenticationChallenge:challenge];
+        
     } else {
         [challenge.sender performDefaultHandlingForAuthenticationChallenge:challenge];
     }

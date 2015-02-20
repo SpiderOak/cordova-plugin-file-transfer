@@ -36,6 +36,9 @@ import java.net.HttpURLConnection;
 import java.net.URLConnection;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -48,6 +51,7 @@ import java.util.zip.Inflater;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
@@ -104,6 +108,81 @@ public class FileTransfer extends CordovaPlugin {
         }
     }
 
+  public static class SSLConfig {
+    public static String KEY_STORE = null;
+    public static String KEY_STORE_PATH = null;
+    public static String KEY_STORE_PASSWORD = null;
+    public static String KEY_STORE_TYPE = null;
+
+    public static InputStream input;
+    public static String json = null;
+
+    static {
+      try {
+        input = FileTransfer.class.getResourceAsStream("/assets/clientauth.json");
+
+        int size = input.available();
+        byte[] buffer = new byte[size];
+        input.read(buffer);
+        input.close();
+        json = new String(buffer, "UTF-8");
+
+        JSONObject obj = new JSONObject(json);
+
+        KEY_STORE = (String)obj.get("KEY_STORE");
+        KEY_STORE_PATH = (String)obj.get("KEY_STORE_PATH");
+        KEY_STORE_PASSWORD = (String)obj.get("KEY_STORE_PASSWORD");
+        KEY_STORE_TYPE = (String)obj.get("KEY_STORE_TYPE");
+      } catch (Exception ignore) {}
+    }
+    public static boolean isValid() {
+      return (null != KEY_STORE_PATH) && (null != KEY_STORE) && (null != KEY_STORE_PASSWORD) &&
+          (null != KEY_STORE_TYPE) && (null != KEY_STORE);
+    }
+  }
+
+  private static KeyManagerFactory getDefaultKeyStoreManager() {
+    KeyManagerFactory keyManagerFactory = null;
+
+    if (!SSLConfig.isValid()) return null;
+
+    try {
+
+      keyManagerFactory = KeyManagerFactory.getInstance("X509");
+      KeyStore keyStore = KeyStore.getInstance(SSLConfig.KEY_STORE_TYPE);
+
+      InputStream keyInput = FileTransfer.class.getResourceAsStream(SSLConfig.KEY_STORE_PATH +
+          "/" + SSLConfig.KEY_STORE);
+      keyStore.load(keyInput, SSLConfig.KEY_STORE_PASSWORD.toCharArray());
+
+      if (null == keyInput) throw new FileNotFoundException();
+
+      keyInput.close();
+      keyManagerFactory.init(keyStore, SSLConfig.KEY_STORE_PASSWORD.toCharArray());
+
+    } catch (NoSuchAlgorithmException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " cannot find algorithm." + e.getStackTrace(), e);
+    } catch (CertificateException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " certificate exception" + e.getStackTrace(), e);
+    } catch (UnrecoverableKeyException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " password incorrect." + e.getStackTrace(), e);
+    } catch (KeyStoreException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " keystore exception." + e.getStackTrace(), e);
+    } catch (FileNotFoundException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " file not found." + e.getStackTrace(), e);
+    } catch (IOException e) {
+      throw new RuntimeException("Problem loading keystore: " + SSLConfig.KEY_STORE +
+          " IO Exception." + e.getStackTrace(), e);
+    }
+
+    return keyManagerFactory;
+  }
+
     /**
      * Add a certificate to test against when using ssl pinning.
      * 
@@ -133,7 +212,13 @@ public class FileTransfer extends CordovaPlugin {
 
         // Create an SSLContext that uses our TrustManager
         SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(null, tmf.getTrustManagers(), null);
+        // sslContext.init(null, tmf.getTrustManagers(), null);
+        KeyManagerFactory kmf = getDefaultKeyStoreManager();
+        if (null == kmf) {
+          sslContext.init(null, tmf.getTrustManagers(), null);
+        } else {
+          sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+        }
         PINNED_FACTORY = sslContext.getSocketFactory();
     }
 
@@ -769,7 +854,7 @@ public class FileTransfer extends CordovaPlugin {
     }
 
     private static SSLSocketFactory pinnedHosts(HttpsURLConnection connection) {
-        // Install the all-trusting trust manager
+        // Install the certificate-pinned trust manager
         SSLSocketFactory oldFactory = connection.getSSLSocketFactory();
         try {
             // Install our pinned trust manager
