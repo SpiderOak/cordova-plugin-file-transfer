@@ -372,7 +372,7 @@ static CFIndex WriteDataToStream(NSData* data, CFWriteStreamRef stream)
 
 -(void)enableSSLPinning:(CDVInvokedUrlCommand*)command
 {
-    self.enableCertPinning = [[command.arguments objectAtIndex:0 withDefault:[NSNumber numberWithBool:NO]] boolValue]; // enable cert pinning
+    self.enableCertPinning = [[command argumentAtIndex:0 withDefault:[NSNumber numberWithBool:NO]] boolValue]; // enable cert pinning
 }
 
 - (void)download:(CDVInvokedUrlCommand*)command
